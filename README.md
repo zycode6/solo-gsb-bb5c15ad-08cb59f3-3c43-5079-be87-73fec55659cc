@@ -1,6 +1,6 @@
 # 环状 DNA 双酶切鉴别服务
 
-基于 FastAPI 的圆形（环状）DNA 双酶切鉴别服务，提供八个互补接口：
+基于 FastAPI 的圆形（环状）DNA 双酶切鉴别服务，提供九个互补接口：
 
 - **方案推荐**：客户端提交质粒长度、参考型与变异型的候选酶切位点、最小可见片段长度和条带分辨容差，服务枚举所有不同酶对，按圆环相邻切点计算两种样本的片段长度，将容差内的片段聚为同一条电泳条带，并推荐能够区分两种样本的酶对。
 - **样本鉴别**：客户端提交同一质粒参考型、变异型的预测条带长度和一次凝胶观测长度列表，服务在给定容差内做确定性的一对一最小代价匹配，分别计算两种样本的缺失条带、额外条带与总误差，判定观测样本为参考型、变异型或无法区分。
@@ -10,6 +10,7 @@
 - **自适应决策树**：客户端提交质粒长度、可见阈值、分辨容差及各基因型在各酶上的切点，服务为每个酶对 × 每个基因型复用同一套圆环酶切与聚带规则生成**规范化条带签名**，先按全部酶对上的签名向量合并永远无法区分的基因型，再以“候选等价类集合 + 剩余酶对”为状态做**记忆化极小化极大搜索**，精确生成最小化最坏实验次数的自适应决策树（同深度依次取内部节点更少、酶对键字典序更小的方案，忽略不能拆分当前集合的酶对）。
 - **部分酶切失败反推**：客户端提交质粒长度、按圆环顺序排列的理论片段（每段长度及其后边界名称）、一次异常凝胶的观测条带、匹配容差与最大失败边界数，服务枚举失败边界数不超过上限的**全部边界子集**；失败（未切开）边界会合并其相邻片段（正确处理连续失败与首尾**跨原点**合并），再复用鉴别接口的一对一条带匹配，按未匹配条带数、总误差、失败边界数、边界名序列依次选出**唯一诊断**，返回合并后预测条带、逐条匹配与失败边界。
 - **凝胶重复一致性**：客户端提交同一样本的若干**命名观测泳道**、条带匹配容差与最少出现次数，服务把全部泳道的条带按（长度、泳道序号）排序做确定性的**全局单连接聚类**，以每簇**中位长度**形成共识谱，逐泳道标记**缺失、额外与低频**条带，并按**共识偏差与异常数**给出稳定性评分，结果与输入顺序无关。
+- **分子量标定（size calibration）**：客户端提交**降序标准 ladder 尺寸**、同泳道的**实测 ladder 迁移距离**、待测条带距离、最大缺带/杂带数与残差阈值，服务按“迁移距离递增、log10(bp) 递减”的保序约束枚举一对一锚点对齐（允许跳过两侧项目，依次最小化跳过总数、距离-log10(bp) 空间的线性回归残差与索引序列），以入选锚点做**分段线性插值**把每条待测带的迁移距离换算为 bp，锚点范围外一律**不外推**（标记越界状态）。
 
 **核心功能为纯本地数学计算，不依赖数据库、缓存或任何外部服务。**
 
@@ -53,6 +54,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | 自适应决策树 | POST | `http://localhost:8000/api/v1/digest/decision-tree` |
 | 部分酶切失败反推 | POST | `http://localhost:8000/api/v1/digest/partial-failure` |
 | 凝胶重复一致性评估 | POST | `http://localhost:8000/api/v1/digest/replicate-consistency` |
+| 分子量标定（距离→bp） | POST | `http://localhost:8000/api/v1/digest/size-calibration` |
 | 交互式 API 文档（Swagger） | GET | `http://localhost:8000/docs` |
 | OpenAPI Schema | GET | `http://localhost:8000/openapi.json` |
 
@@ -60,7 +62,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://localhost:8000/health
-# {"status":"ok","service":"circular-dna-digest","version":"1.7.0"}
+# {"status":"ok","service":"circular-dna-digest","version":"1.8.0"}
 ```
 
 ---
@@ -84,6 +86,7 @@ curl http://localhost:8000/health
 | `MAX_DECISION_ENZYMES` | `10` | decision-tree 接口允许的最大酶数量（酶对数为 C(n,2)，独立于 `MAX_ENZYMES`） | 编辑 `environment` |
 | `MAX_PARTIAL_FAILURE_BOUNDARIES` | `16` | partial-failure 接口允许的最大理论片段（边界）数（需枚举至多 `max_failed_boundaries` 规模的全部边界子集，最坏 2ⁿ） | 编辑 `environment` |
 | `MAX_REPLICATE_LANES` | `32` | replicate-consistency 接口允许的最大泳道数（全局聚类规模为各泳道条带数之和） | 编辑 `environment` |
+| `MAX_CALIBRATION_LADDER_BANDS` | `20` | size-calibration 接口允许的最大标准/实测 ladder 条数（需枚举 C(n,k)·C(m,k) 组保序锚点对齐） | 编辑 `environment` |
 
 ---
 
@@ -464,6 +467,44 @@ curl -X POST http://localhost:8000/api/v1/digest/replicate-consistency \
 - `most_stable_lanes`：稳定性评分最高的泳道名（并列时全部列出，按字典序）。
 - `stability_reason`：中文评估依据，说明全局聚类、共识谱、异常判定与评分公式；全部指标可由响应字段复算。
 
+### 分子量标定（POST `/api/v1/digest/size-calibration`）
+
+#### 请求体（JSON）
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `ladder_sizes` | number[] | 标准 ladder 条带尺寸（bp），每条 > 0，**严格降序**（大段在前）、不可重复，至少 2 条，条数不超过 `MAX_CALIBRATION_LADDER_BANDS`（默认 20） |
+| `ladder_distances` | number[] | 标准 ladder 的实测迁移距离（自加样孔起算），每条 ≥ 0，列表内部**不可重复**，至少 2 条，条数不超过 `MAX_CALIBRATION_LADDER_BANDS`；提交顺序任意（服务按距离递增枚举） |
+| `sample_distances` | number[] | 待测条带迁移距离，每条 ≥ 0，列表内部不可重复（与 ladder 距离允许相同），可为空，条数不超过 `MAX_BANDS` |
+| `max_missed_bands` | int | ≥ 0，允许的最大缺带/杂带总数：未入选锚点的标准带 + 未入选锚点的实测 ladder 带数量之和不得超过该值（且不超过两侧 ladder 条数之和） |
+| `residual_threshold` | number | ≥ 0，线性回归残差阈值（log10(bp) 量纲）；最优对齐的 RMSE 超过该值时整体拒绝 |
+
+请求示例见 [`examples/size-calibration-request.json`](examples/size-calibration-request.json)（6 条标准、7 条实测 ladder，其中 97.5 为杂带；4 条待测带含 2 条越界）：
+
+```bash
+curl -X POST http://localhost:8000/api/v1/digest/size-calibration \
+  -H 'Content-Type: application/json' \
+  -d @examples/size-calibration-request.json
+```
+
+#### 算法说明（分子量标定）
+
+1. **单调锚点对齐**：标准尺寸降序给出，故 `log10(bp)` 严格递减；实测 ladder 距离按递增排列。一次合法的一对一锚点对齐是两条序列间的一组**保序配对**（LCS 式对齐）：标准侧选中的降序序号严格递增、距离侧选中的升序序号也严格递增，几何上即满足“迁移距离递增、log10(bp) 递减”。允许跳过两侧项目——未选中的标准带为**缺失标准带**，未选中的实测 ladder 带为**杂带**。
+2. **三级优化目标（按次序）**：
+   ① **跳过总数最少**：`缺失 + 杂带 = n + m − 2·锚点数` 最小，即锚点数固定取最大值 `k = min(n, m)`；锚点更少的对齐跳过更多，不可能更优，故只需枚举 `C(n,k)·C(m,k)` 组对齐；
+   ② **线性回归残差最小**：在入选锚点的 `(distance, log10(size))` 上最小二乘拟合 `log10(bp) = a + b·distance`，取锚点残差 `RMSE = sqrt(Σ(y − ŷ)² / k)` 最小者；
+   ③ **索引序列字典序最小**：残差并列时，取按距离递增排列的 `(标准降序序号, 距离升序序号)` 索引对序列字典序最小者（优先保留靠近大尺寸端 / 近孔侧的带），保证结果唯一且与提交顺序无关。
+3. **残差门槛**：最优对齐的锚点数 < 2，或最少跳过数已超过 `max_missed_bands` 时无法取得至少两个锚点，返回 422；最优对齐 RMSE 超过 `residual_threshold` 时同样返回 422（阈值比较使用未舍入残差）。注意三级目标是字典序的：**不会**为了降低残差而多跳过 ladder 带（残差超阈值即使放宽跳过预算仍可能被更优对齐拒绝）。
+4. **分段线性插值（绝不外推）**：以入选锚点在距离-log10(bp) 空间做**分段线性插值**。待测距离落在 `[最小锚点距离, 最大锚点距离]` 内时，在所在锚点区间内线性插值得到 `log10(bp)` 后取 `10 ** log10(bp)`（bp 保留两位小数）；严格小于最小锚点距离标记 `below_range`、严格大于最大锚点距离标记 `above_range`，一律**不外推**，`estimated_bp` 为 `null`。恰好等于锚点距离时取该锚点尺寸。
+
+#### 响应要点（分子量标定）
+
+- `anchors`：入选锚点对应（按迁移距离递增），每条含 `ladder_index`（标准降序列表序号，从 1 开始）、`size`（bp）、`distance`、`log10_size`。
+- `missing_ladder_sizes` / `missing_ladder_count`：缺失标准带尺寸（按尺寸降序）；`spurious_ladder_distances` / `spurious_ladder_count`：杂带距离（按距离递增）。
+- `regression_intercept` / `regression_slope`：最优锚点在距离-log10(bp) 空间的最小二乘拟合参数（保留 6 位小数）；`residual_rmse`：锚点回归 RMSE（log10(bp) 量纲，保留 6 位小数），恒 ≤ `residual_threshold`。
+- `sample_bands`：逐条待测带结果（按距离递增），含 `band_index`、`distance`、`status`（`estimated` / `below_range` / `above_range`）、`estimated_bp`（越界为 `null`）与中文依据；`estimated_count` / `out_of_range_count` 为对应计数。
+- `calibration_reason`：中文标定依据，说明锚点枚举约束、三级优化目标、残差阈值与不外推规则。
+
 ### 拒绝条件（HTTP 422）
 
 以下输入问题整体拒绝，返回统一结构 `{"code":"validation_failed","errors":[...]}`，一次性报告全部错误：
@@ -529,6 +570,16 @@ curl -X POST http://localhost:8000/api/v1/digest/replicate-consistency \
 - `band_match_tolerance` 为负 / 缺失 / 非数值；
 - `min_occurrences` 缺失、非整数、< 1，或**超过泳道总数**。
 
+分子量标定接口（`/api/v1/digest/size-calibration`）：
+
+- 标准 ladder 尺寸未**严格降序**（出现递增或重复，对应 `ladder_sizes_not_descending`）；
+- 实测 ladder 距离或待测距离**列表内部重复**（对应 `duplicate_migration_distance`；ladder 与待测之间的距离允许相同）；
+- 标准 / 实测 ladder 任一列表不足 2 条，或条数超过 `MAX_CALIBRATION_LADDER_BANDS`（默认 20）上限；待测条带数超过 `MAX_BANDS` 上限；
+- `max_missed_bands` 缺失、非整数、< 0，或**超过两侧 ladder 条数之和**；
+- 最少需要跳过的项目数（`|标准条数 − 实测条数|`）已超过 `max_missed_bands`，**无法取得至少两个锚点**（对应 `insufficient_calibration_anchors`）；
+- 最优锚点对齐的回归 RMSE **超过残差阈值**（对应 `residual_threshold_exceeded`）；
+- 标准尺寸 ≤ 0、迁移距离为负、残差阈值为负 / 缺失 / 非数值等字段约束错误。
+
 注意：推荐接口中切点不足两个属于**酶对级别**的拒绝（记录在 `rejected_pairs`，HTTP 200），而非请求级别错误；面板接口中某变异型无可用酶对时同样返回 HTTP 200（列入 `uncovered_variants`，不返回部分面板）；批量盲样分配接口中所有候选边都超过未匹配阈值时同样返回 HTTP 200（`assignments` 为空、全部泳道列入 `unassigned_lanes`）；决策树接口中某基因型在某酶对上切点不足 2 个或某酶对对全部基因型签名相同，均属于**酶对级别**结果（空签名 / 列入 `non_discriminating_pairs`，HTTP 200），永远无法区分的基因型列入 `indistinguishable_groups`。
 
 ---
@@ -538,9 +589,9 @@ curl -X POST http://localhost:8000/api/v1/digest/replicate-consistency \
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 入口：健康检查、推荐/鉴别/面板/混合/批量分配/决策树/部分失败反推/重复一致性路由、统一 422 处理
+│   ├── main.py          # FastAPI 入口：健康检查、推荐/鉴别/面板/混合/批量分配/决策树/部分失败反推/重复一致性/分子量标定路由、统一 422 处理
 │   ├── models.py        # 请求/响应 Pydantic 模型
-│   ├── validation.py    # 越界、重复位点、名称一致性、条带/候选/基因型规模等语义校验
+│   ├── validation.py    # 越界、重复位点、名称一致性、条带/候选/基因型规模、ladder 降序/距离重复等语义校验
 │   ├── digest.py        # 圆环片段、条带聚类、酶对枚举与排序（纯函数）
 │   ├── identify.py      # 条带一对一最小代价匹配与样本判定（纯函数）
 │   ├── panel.py         # 逐变异评估与精确最小酶对面板（纯函数）
@@ -549,6 +600,7 @@ curl -X POST http://localhost:8000/api/v1/digest/replicate-consistency \
 │   ├── decision_tree.py # 规范化条带签名、不可区分合并与记忆化极小化极大决策树（纯函数）
 │   ├── partial_failure.py # 失败边界的圆环片段合并（含连续失败/跨原点）、子集枚举与唯一诊断选定（纯函数）
 │   ├── replicate_consistency.py # 多泳道全局条带聚类、共识谱与逐泳道缺失/额外/低频标记及稳定性评分（纯函数）
+│   ├── size_calibration.py # ladder 保序锚点枚举（跳过数/残差/索引序列三级目标）、回归校验与分段线性插值 bp（纯函数）
 │   └── config.py        # 环境变量配置（均有默认值）
 ├── tests/               # pytest 单元 + API 端到端测试
 ├── examples/request.json
@@ -559,6 +611,7 @@ curl -X POST http://localhost:8000/api/v1/digest/replicate-consistency \
 ├── examples/decision-tree-request.json
 ├── examples/partial-failure-request.json
 ├── examples/replicate-consistency-request.json
+├── examples/size-calibration-request.json
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

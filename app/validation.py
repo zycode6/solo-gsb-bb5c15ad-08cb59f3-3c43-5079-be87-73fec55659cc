@@ -15,6 +15,7 @@ from app.models import (
     PanelRequest,
     PartialFailureRequest,
     ReplicateConsistencyRequest,
+    SizeCalibrationRequest,
 )
 
 
@@ -482,6 +483,86 @@ def validate_replicate_consistency_request(
             ["min_occurrences"],
             f"最少出现次数（{req.min_occurrences}）不能超过泳道数量（{lane_count}）",
             "min_occurrences_too_large",
+        ))
+
+    if errors:
+        raise DigestValidationError(errors)
+    return req
+
+
+def validate_size_calibration_request(
+    req: SizeCalibrationRequest,
+) -> SizeCalibrationRequest:
+    """size-calibration 接口的语义校验：降序标准、距离重复、缺带上限与规模上限。
+
+    标准尺寸非正、列表不足 2 条、距离为负、``max_missed_bands`` 为负、
+    残差阈值为负 / 缺失等基础字段约束由 Pydantic 模型直接拦截，与此处一样
+    输出统一结构的 422 响应。
+    """
+    errors: list[dict] = []
+
+    # 标准 ladder 尺寸必须严格降序（隐式保证 log10(bp) 严格递减、无重复）
+    sizes = list(req.ladder_sizes)
+    for i in range(1, len(sizes)):
+        if sizes[i] >= sizes[i - 1]:
+            errors.append(_err(
+                ["ladder_sizes"],
+                f"标准 ladder 尺寸必须严格降序（大段在前）：第 {i} 项 {sizes[i]:g} "
+                f"不小于前一项 {sizes[i - 1]:g}",
+                "ladder_sizes_not_descending",
+            ))
+            break
+
+    if len(sizes) > settings.MAX_CALIBRATION_LADDER_BANDS:
+        errors.append(_err(
+            ["ladder_sizes"],
+            f"标准 ladder 条数（{len(sizes)}）超过允许上限 "
+            f"{settings.MAX_CALIBRATION_LADDER_BANDS}（需枚举保序锚点对齐）",
+            "too_many_calibration_ladder_bands",
+        ))
+
+    if len(req.ladder_distances) > settings.MAX_CALIBRATION_LADDER_BANDS:
+        errors.append(_err(
+            ["ladder_distances"],
+            f"实测 ladder 距离条数（{len(req.ladder_distances)}）超过允许上限 "
+            f"{settings.MAX_CALIBRATION_LADDER_BANDS}（需枚举保序锚点对齐）",
+            "too_many_calibration_ladder_bands",
+        ))
+
+    # 迁移距离重复无法形成单调锚点：ladder 内部、待测内部重复均拒绝；
+    # ladder 与待测之间的距离允许相同（不同泳道 / 共迁移）
+    for field, label in (
+        ("ladder_distances", "实测 ladder 迁移距离"),
+        ("sample_distances", "待测条带迁移距离"),
+    ):
+        values = [float(v) for v in getattr(req, field)]
+        seen: set[float] = set()
+        for v in values:
+            if v in seen:
+                errors.append(_err(
+                    [field],
+                    f"{label}存在重复值 {v:g}：同一列表内迁移距离必须互不相同",
+                    "duplicate_migration_distance",
+                ))
+                break
+            seen.add(v)
+
+    if len(req.sample_distances) > settings.MAX_BANDS:
+        errors.append(_err(
+            ["sample_distances"],
+            f"待测条带数量（{len(req.sample_distances)}）超过允许上限 "
+            f"{settings.MAX_BANDS}",
+            "too_many_bands",
+        ))
+
+    # 缺带/杂带上限过大无意义：跳过总数不可能超过 ladder 两侧条数之和
+    skip_cap = len(req.ladder_sizes) + len(req.ladder_distances)
+    if req.max_missed_bands > skip_cap:
+        errors.append(_err(
+            ["max_missed_bands"],
+            f"最大缺带/杂带数（{req.max_missed_bands}）不能超过标准与实测 ladder "
+            f"条数之和（{skip_cap}）",
+            "max_missed_bands_too_large",
         ))
 
     if errors:

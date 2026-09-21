@@ -13,6 +13,10 @@ SampleName = Literal["reference", "variant"]
 # 条带长度 / 匹配容差：非负有限浮点数（JSON 整数自动转换）
 NonNegativeBand = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
+# 迁移距离：非负有限浮点数；标准 ladder 尺寸 / 估算 bp：正有限浮点数
+NonNegativeDistance = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+PositiveSize = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+
 
 # ---------------------------------------------------------------- 输入模型
 
@@ -591,4 +595,93 @@ class ReplicateConsistencyResponse(BaseModel):
     )
     stability_reason: str = Field(
         description="中文评估依据：全局聚类、共识谱、异常判定与稳定性评分公式"
+    )
+
+
+# ------------------------------------------ 分子量标定（size-calibration）模型
+
+class SizeCalibrationRequest(BaseModel):
+    ladder_sizes: list[PositiveSize] = Field(
+        ..., min_length=2,
+        description="标准 ladder 条带尺寸列表（bp），按**降序**排列（大段在前），"
+                    "值必须严格递减、不可重复，至少 2 条",
+    )
+    ladder_distances: list[NonNegativeDistance] = Field(
+        ..., min_length=2,
+        description="标准 ladder 的实测迁移距离列表（自加样孔起算），与 ladder_sizes "
+                    "同泳道；条带按距离递增枚举对齐，列表本身不必有序，但距离不可重复，至少 2 条",
+    )
+    sample_distances: list[NonNegativeDistance] = Field(
+        default_factory=list,
+        description="待测条带的实测迁移距离列表；可与 ladder 距离重复，但列表内部不可重复，可为空",
+    )
+    max_missed_bands: int = Field(
+        ..., ge=0,
+        description="允许的最大缺带/杂带总数：未入选锚点的标准 ladder 带（缺失标准带）"
+                    "与未入选锚点的实测 ladder 带（杂带）数量之和不得超过该值",
+    )
+    residual_threshold: NonNegativeBand = Field(
+        ...,
+        description="线性回归残差阈值：入选锚点在距离-log10(bp) 空间的回归 RMSE "
+                    "（log10(bp) 量纲）必须 ≤ 该值，否则整体拒绝（422）",
+    )
+
+
+class CalibrationAnchorOut(BaseModel):
+    ladder_index: int = Field(description="标准 ladder 尺寸序号（按请求的降序列表，从 1 开始）")
+    size: float = Field(description="该锚点对应的标准尺寸（bp）")
+    distance: float = Field(description="该锚点对应的实测迁移距离")
+    log10_size: float = Field(description="该锚点的 log10(size)，保留 6 位小数")
+
+
+class CalibrationSampleBandOut(BaseModel):
+    band_index: int = Field(
+        description="待测条带序号（按迁移距离升序排列后的序号，从 1 开始）"
+    )
+    distance: float = Field(description="该待测条带的实测迁移距离")
+    status: Literal["estimated", "below_range", "above_range"] = Field(
+        description="estimated：落在最小/最大锚点距离之间，按分段线性插值给出估算；"
+                    "below_range：近孔侧超出锚点范围（距离 < 最小锚点距离，对应 bp 超出最大锚点）；"
+                    "above_range：远孔侧超出锚点范围（距离 > 最大锚点距离，对应 bp 低于最小锚点）；"
+                    "超出范围一律不外推，estimated_bp 为 null"
+    )
+    estimated_bp: float | None = Field(
+        default=None, description="估算片段长度（bp，保留两位小数）；越界时为 null"
+    )
+    description: str = Field(description="中文估算依据说明")
+
+
+class SizeCalibrationResponse(BaseModel):
+    anchor_count: int = Field(description="入选锚点数量（至少 2 个，否则返回 422）")
+    anchors: list[CalibrationAnchorOut] = Field(
+        description="入选锚点对应关系，按迁移距离递增排列（即 log10(bp) 递减、标准降序序号递增）"
+    )
+    missing_ladder_count: int = Field(
+        description="缺失标准带数：未入选任何锚点的标准 ladder 尺寸条数"
+    )
+    missing_ladder_sizes: list[float] = Field(
+        description="缺失标准带尺寸（bp），按尺寸降序（与请求中标准列表同序）"
+    )
+    spurious_ladder_count: int = Field(
+        description="杂带数：未入选任何锚点的实测 ladder 距离条数"
+    )
+    spurious_ladder_distances: list[float] = Field(
+        description="杂带迁移距离，按距离递增排列"
+    )
+    regression_intercept: float = Field(
+        description="入选锚点在距离-log10(bp) 空间最小二乘拟合 log10(bp)=a+b·distance 的截距 a，保留 6 位小数"
+    )
+    regression_slope: float = Field(description="拟合斜率 b（≤ 0），保留 6 位小数")
+    residual_rmse: float = Field(
+        description="线性回归残差（锚点 log10(bp) 与拟合值偏差的均方根，log10(bp) 量纲），保留 6 位小数"
+    )
+    residual_threshold: float
+    sample_band_count: int = Field(description="待测条带总数")
+    estimated_count: int = Field(description="落入锚点范围内、成功估算 bp 的待测带数")
+    out_of_range_count: int = Field(description="超出锚点范围、未外推的待测带数")
+    sample_bands: list[CalibrationSampleBandOut] = Field(
+        description="逐条待测带估算结果，按迁移距离递增排列"
+    )
+    calibration_reason: str = Field(
+        description="中文标定依据：锚点枚举约束、三级优化目标、残差阈值与不外推规则"
     )

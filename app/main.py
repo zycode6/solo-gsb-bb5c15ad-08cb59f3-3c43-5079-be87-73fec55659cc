@@ -30,10 +30,13 @@ from app.models import (
     PartialFailureResponse,
     ReplicateConsistencyRequest,
     ReplicateConsistencyResponse,
+    SizeCalibrationRequest,
+    SizeCalibrationResponse,
 )
 from app.panel import build_panel
 from app.partial_failure import resolve_partial_failure
 from app.replicate_consistency import assess_replicate_consistency
+from app.size_calibration import CalibrationError, calibrate_sizes
 from app.validation import (
     DigestValidationError,
     validate_batch_identify_request,
@@ -44,9 +47,10 @@ from app.validation import (
     validate_partial_failure_request,
     validate_replicate_consistency_request,
     validate_request,
+    validate_size_calibration_request,
 )
 
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 
 app = FastAPI(
     title="Circular DNA Double-Digest Discrimination Service",
@@ -67,7 +71,10 @@ app = FastAPI(
         "从异常凝胶反推最可能的部分酶切失败边界；还可对同一样本的若干命名观测泳道"
         "做确定性的全局条带聚类（并列按长度与泳道序号破同分），以每簇中位长度形成"
         "共识谱，逐泳道标记缺失、额外与低频条带，并按共识偏差与异常数给出稳定性评分，"
-        "结果与输入顺序无关。"
+        "结果与输入顺序无关；还可把降序标准 ladder 尺寸与实测迁移距离按"
+        "“距离递增、log10(bp) 递减”的保序约束枚举一对一锚点对齐"
+        "（允许两侧跳过，依次最小化跳过总数、线性回归残差与索引序列），"
+        "以入选锚点做分段线性插值（绝不外推），把待测条带迁移距离换算为 bp。"
     ),
     version=VERSION,
 )
@@ -83,6 +90,11 @@ def _validation_response(errors: list[dict]) -> JSONResponse:
 @app.exception_handler(DigestValidationError)
 async def digest_validation_handler(request: Request, exc: DigestValidationError) -> JSONResponse:
     return _validation_response(exc.detail["errors"])
+
+
+@app.exception_handler(CalibrationError)
+async def calibration_error_handler(request: Request, exc: CalibrationError) -> JSONResponse:
+    return _validation_response(exc.errors)
 
 
 @app.exception_handler(RequestValidationError)
@@ -187,6 +199,19 @@ async def digest_replicate_consistency(
 ) -> ReplicateConsistencyResponse:
     validate_replicate_consistency_request(req)
     return assess_replicate_consistency(req)
+
+
+@app.post(
+    "/api/v1/digest/size-calibration",
+    response_model=SizeCalibrationResponse,
+    tags=["digest"],
+    summary="以标准 ladder 枚举锚点对齐并把凝胶迁移距离分段线性插值标定为片段 bp",
+)
+async def digest_size_calibration(
+    req: SizeCalibrationRequest,
+) -> SizeCalibrationResponse:
+    validate_size_calibration_request(req)
+    return calibrate_sizes(req)
 
 
 if __name__ == "__main__":

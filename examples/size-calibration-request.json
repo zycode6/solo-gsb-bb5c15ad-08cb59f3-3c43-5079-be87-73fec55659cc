@@ -1,0 +1,7 @@
+{
+  "ladder_sizes": [2000, 1500, 1000, 750, 500, 250],
+  "ladder_distances": [29.9, 42.39, 60.0, 72.49, 90.1, 120.21, 97.5],
+  "sample_distances": [20.0, 45.0, 80.0, 130.0],
+  "max_missed_bands": 1,
+  "residual_threshold": 0.02
+}
