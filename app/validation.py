@@ -15,6 +15,7 @@ from app.models import (
     PanelRequest,
     PartialFailureRequest,
     ReplicateConsistencyRequest,
+    SizeCalibrationRequest,
 )
 
 
@@ -483,6 +484,76 @@ def validate_replicate_consistency_request(
             f"最少出现次数（{req.min_occurrences}）不能超过泳道数量（{lane_count}）",
             "min_occurrences_too_large",
         ))
+
+    if errors:
+        raise DigestValidationError(errors)
+    return req
+
+
+def validate_size_calibration_request(
+    req: SizeCalibrationRequest,
+) -> SizeCalibrationRequest:
+    """size-calibration 接口的语义校验：ladder 降序唯一性、距离去重与规模上限。
+
+    字段为负 / 非数值、列表长度不足 2、上限或阈值非法等基础约束由 Pydantic
+    模型直接拦截，与此处一样输出统一结构的 422 响应。锚点不足 2 个、跳过
+    预算不可达与回归残差超阈值属于算法级拒绝，在 :mod:`app.size_calibration`
+    中同样以 :class:`DigestValidationError` 抛出。
+    """
+    errors: list[dict] = []
+
+    if len(req.ladder_sizes) > settings.MAX_CALIBRATION_LADDER_BANDS:
+        errors.append(_err(
+            ["ladder_sizes"],
+            f"标准 ladder 条数（{len(req.ladder_sizes)}）超过允许上限 "
+            f"{settings.MAX_CALIBRATION_LADDER_BANDS}（锚点对齐需枚举保序"
+            "下标组合）",
+            "too_many_ladder_bands",
+        ))
+
+    if len(req.ladder_distances) > settings.MAX_CALIBRATION_LADDER_BANDS:
+        errors.append(_err(
+            ["ladder_distances"],
+            f"ladder 实测距离条数（{len(req.ladder_distances)}）超过允许上限 "
+            f"{settings.MAX_CALIBRATION_LADDER_BANDS}",
+            "too_many_ladder_bands",
+        ))
+
+    if len(req.sample_distances) > settings.MAX_BANDS:
+        errors.append(_err(
+            ["sample_distances"],
+            f"待测条带数量（{len(req.sample_distances)}）超过允许上限 "
+            f"{settings.MAX_BANDS}",
+            "too_many_bands",
+        ))
+
+    # 标准 ladder 尺寸必须严格降序且不可重复（直接表征距离递增 / bp 递减）
+    sizes = [float(s) for s in req.ladder_sizes]
+    desc_violations = [
+        i + 1 for i in range(1, len(sizes)) if sizes[i] >= sizes[i - 1]
+    ]
+    if desc_violations:
+        errors.append(_err(
+            ["ladder_sizes"],
+            f"ladder_sizes 必须按片段尺寸严格降序提交（迁移距离递增、"
+            f"log10(bp) 递减）；第 {desc_violations} 个位置未严格小于前一条"
+            "（相等视为重复尺寸）",
+            "ladder_sizes_not_descending",
+        ))
+
+    for field, label in (
+        ("ladder_distances", "ladder 实测迁移距离"),
+        ("sample_distances", "待测条带迁移距离"),
+    ):
+        distances = [float(d) for d in getattr(req, field)]
+        if len(set(distances)) != len(distances):
+            dupes = sorted({d for d in distances if distances.count(d) > 1})
+            errors.append(_err(
+                [field],
+                f"{label}存在重复值 {dupes}：同一距离无法区分条带，"
+                "锚点对齐要求距离互不相同",
+                "duplicate_distance",
+            ))
 
     if errors:
         raise DigestValidationError(errors)

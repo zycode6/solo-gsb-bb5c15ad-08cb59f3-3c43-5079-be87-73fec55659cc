@@ -39,5 +39,11 @@ class Settings:
     # replicate-consistency 接口允许的最大泳道数：全局聚类规模为各泳道条带数之和
     MAX_REPLICATE_LANES: int = int(os.getenv("MAX_REPLICATE_LANES", "32"))
 
+    # size-calibration 接口允许的标准 ladder 条数与实测 ladder 条数上限：
+    # 锚点对齐需枚举两组保序下标组合，取 k = min(n, m) 时最坏枚举 C(较长侧, k)
+    MAX_CALIBRATION_LADDER_BANDS: int = int(
+        os.getenv("MAX_CALIBRATION_LADDER_BANDS", "16")
+    )
+
 
 settings = Settings()
